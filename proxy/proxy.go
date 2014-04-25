@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	//"github.com/astaxie/beego"
 	"github.com/astaxie/beego/context"
 	"github.com/elazarl/goproxy"
 	//"github.com/elazarl/goproxy/ext/html"
@@ -10,29 +11,43 @@ import (
 	"log"
 	. "net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
-type Count struct {
-	Id    string
-	Count int64
+type Identifier struct {
+	Url string
+	Sn  uint64
+	Ip  string
 }
 type CountReadCloser struct {
-	Id string
-	R  io.ReadCloser
-	ch chan<- Count
-	nr int64
+	Id          string
+	R           io.ReadCloser
+	nr          uint64
+	content     []byte //a copy of content
+	Sn          uint64 //request number
+	redisConfig string //redis config
 }
 
 func (c *CountReadCloser) Read(b []byte) (n int, err error) {
 	n, err = c.R.Read(b)
-	c.nr += int64(n)
+	c.content = append(c.content[0:c.nr], b[0:n]...)
+	c.nr += uint64(n)
 	return
 }
 func (c CountReadCloser) Close() error {
-	c.ch <- Count{c.Id, c.nr}
+	SaveUrlContentInRedis(c, c.redisConfig)
 	return c.R.Close()
+}
+
+func SaveUrlContentInRedis(cr CountReadCloser, redisConfig string) {
+	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
+	errHndlr(err)
+	defer rds.Close()
+	sn := strconv.FormatUint(cr.Sn, 36)
+	//将当前请求的内容记录在redis里 key就等于 content-{id}
+	rds.Cmd("SET", fmt.Sprintf("content-%s", sn), string(cr.content))
 }
 
 func errHndlr(err error) {
@@ -41,17 +56,20 @@ func errHndlr(err error) {
 		os.Exit(1)
 	}
 }
-func holdRedis(req_chan chan Request) {
-	rds, err := redis.DialTimeout("tcp", "127.0.0.1:6379", time.Duration(10)*time.Second)
+func holdRedis(req_chan chan *Identifier, redisConfig string) {
+	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
 	errHndlr(err)
 	defer rds.Close()
 	for {
 		select {
-		case req := <-req_chan:
-			s := rds.Cmd("lpush", "127.0.0.1", req.URL)
-			fmt.Println("push in list:", req.URL)
-			if s == nil {
+		case cnt := <-req_chan:
+			s := rds.Cmd("lpush", cnt.Ip, strconv.FormatUint(cnt.Sn, 36))
+			fmt.Println("lpush:", cnt.Ip, strconv.FormatUint(cnt.Sn, 36))
+			fmt.Println("push in list:", cnt.Url)
 
+			if s == nil {
+			} else {
+				fmt.Println("push into list", cnt.Ip, " 失败,", s)
 			}
 		}
 	}
@@ -107,26 +125,7 @@ func PushActiveClient(redisConfig string, ctx *context.Context) {
 	rds.Cmd("SADD", "activeIPs", ip)
 	//fmt.Println("sadd members:", s)
 }
-func HoldRedisContent(rep_chan chan Response) {
-	rds, err := redis.DialTimeout("tcp", "127.0.0.1:6379", time.Duration(10)*time.Second)
-	errHndlr(err)
-	defer rds.Close()
 
-	for {
-		select {
-		case res := <-rep_chan:
-			fmt.Println("got new resp msg:")
-			var b []byte
-			res.Body.Read(b)
-			var st string
-			a, _ := res.Body.Read(b)
-			st = string(a)
-			rds.Cmd("set", res.Request.URL, st).Str()
-
-			fmt.Println("read bytes:", st)
-		}
-	}
-}
 func fetchQueue() {
 	rds, err := redis.DialTimeout("tcp", "127.0.0.1:6379", time.Duration(10)*time.Second)
 	errHndlr(err)
@@ -137,12 +136,29 @@ func fetchQueue() {
 		fmt.Println("fetched from Redis:", s)
 	}
 }
-func FetchUrlList4Ip(redisConfig string, ip string) []string {
+func FetchUrlList4Ip(redisConfig string, ip string) []map[string]interface{} {
 	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
 	errHndlr(err)
 	defer rds.Close()
 	s, _ := rds.Cmd("LRANGE", ip, 0, 100).List()
-	return s
+
+	//fmt.Println(...)
+	if s == nil {
+		return make([]map[string]interface{}, 0)
+	}
+	res := make([]map[string]interface{}, len(s))
+	i := 0
+	for _, v := range s {
+
+		tmp := make(map[string]interface{})
+		url, _ := rds.Cmd("GET", fmt.Sprintf("url-%s", v)).Str()
+		tmp["url"] = url
+		tmp["id"] = v
+		res[i] = tmp
+		i++
+
+	}
+	return res
 }
 func SrcIpBeginWith(ip string) goproxy.ReqCondition {
 	return goproxy.ReqConditionFunc(func(req *Request, ctx *goproxy.ProxyCtx) bool {
@@ -158,32 +174,32 @@ func SrcIpWanted(redisConfig string) goproxy.ReqCondition {
 func RunProxy() {
 	proxy := goproxy.NewProxyHttpServer()
 
-	req_chan := make(chan Request, 10000)
-	rep_chan := make(chan Response, 100000)
-	go holdRedis(req_chan)
+	req_chan := make(chan *Identifier, 10000)
+	//rep_chan := make(chan Response, 100000)
+	go holdRedis(req_chan, "127.0.0.1:6379")
 	//go fetchQueue()
-	go HoldRedisContent(rep_chan)
-	// proxy.OnRequest().DoFunc(func(r *Request, ctx *goproxy.ProxyCtx) *Request {
-	// 	fmt.Println(ctx.Req.Host, ctx.Req.Header, ctx.Req.URL, ctx.Req.RemoteAddr)
-	// 	return r
-	// })
+	//go HoldRedisContent(rep_chan)
+	var counter uint64
+	counter = 0
+	proxy.OnResponse(SrcIpWanted("127.0.0.1:6379")).DoFunc(func(resp *Response, ctx *goproxy.ProxyCtx) *Response {
+		fmt.Println("response done :", ctx.Req.URL)
+		counter++
+		ip := strings.Split(ctx.Req.RemoteAddr, ":")[0]
+		req_chan <- &Identifier{Url: ctx.Req.URL.String(), Sn: counter, Ip: ip}
+		if resp == nil {
+			return resp
+		}
+		resp.Body = &CountReadCloser{ctx.Req.URL.String(), resp.Body, 0, make([]byte, 64), counter, "127.0.0.1:6379"}
 
-	//**
-	// var IsLocalHost ReqConditionFunc = func(req *http.Request, ctx *ProxyCtx) bool {
-	// 	return req.URL.Host == "::1" ||
-	// 		req.URL.Host == "0:0:0:0:0:0:0:1" ||
-	// 		localHostIpv4.MatchString(req.URL.Host) ||
-	// 		req.URL.Host == "localhost"
-	// }
-	proxy.OnRequest(SrcIpWanted("127.0.0.1:6379")).DoFunc(func(r *Request, ctx *goproxy.ProxyCtx) (*Request, *Response) {
-		req_chan <- *r
-		return r, ctx.Resp
+		rds, err := redis.DialTimeout("tcp", "127.0.0.1:6379", time.Duration(10)*time.Second)
+		errHndlr(err)
+		defer rds.Close()
+		sn := strconv.FormatUint(counter, 36)
+		//将当前请求的URL记录在redis里 key就等于 ulr-{id}
+		rds.Cmd("SET", fmt.Sprintf("url-%s", sn), ctx.Req.URL.String())
+		fmt.Println("redis kv set:", fmt.Sprintf("url-%s", sn), ctx.Req.URL.String())
+		//rep_chan <- *ctx.Resp
+		return resp
 	})
-	// proxy.OnResponse(goproxy_html.IsWebRelatedText).DoFunc(func(resp *Response, ctx *goproxy.ProxyCtx) *Response {
-	// 	fmt.Println("response done :", ctx.Req.URL)
-	// 	resp.Body = &CountReadCloser{ctx.Req.URL.String(), resp.Body, nil, 0}
-	// 	//rep_chan <- *ctx.Resp
-	// 	return resp
-	// })
 	log.Fatal(ListenAndServe(":8080", proxy))
 }

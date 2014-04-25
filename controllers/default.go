@@ -1,10 +1,21 @@
 package controllers
 
 import (
+	"fmt"
 	"github.com/astaxie/beego"
+	"github.com/fzzy/radix/redis"
+	"os"
 	"stack/proxy"
 	"strings"
+	"time"
 )
+
+func errHndlr(err error) {
+	if err != nil {
+		fmt.Println("error:", err)
+		os.Exit(1)
+	}
+}
 
 type MainController struct {
 	beego.Controller
@@ -22,9 +33,19 @@ type UrlController struct {
 
 func (this *UrlController) View() {
 	mp := make(map[string]interface{})
-	mp["url"] = "http://www.sohu.com/"
-	mp["domain"] = "www.sohu.com"
-	mp["body"] = "this is response"
+	id := this.Ctx.Input.Param("0")
+	rds, err := redis.DialTimeout("tcp", "127.0.0.1:6379", time.Duration(10)*time.Second)
+	errHndlr(err)
+	defer rds.Close()
+	sn := id
+	//将当前请求的URL记录在redis里 key就等于 ulr-{id}
+	url := rds.Cmd("GET", fmt.Sprintf("url-%s", sn)).String()
+	content := rds.Cmd("GET", fmt.Sprintf("content-%s", sn)).String()
+
+	mp["url"] = url
+	mp["id"] = id
+	mp["body"] = content
+	mp["domain"] = "这是请求内容"
 	this.Data["json"] = mp
 	this.ServeJson()
 }
@@ -53,21 +74,21 @@ func (this *UrlController) List() {
 		this.Data["IsClient"] = "no,it's not active client"
 	}
 	urls := proxy.FetchUrlList4Ip("127.0.0.1:6379", "127.0.0.1")
-	l := len(urls)
-	mp := make([]map[string]interface{}, l)
-	j := 0
-	for _, v := range urls {
-		tmp := make(map[string]interface{})
-		tmp["url"] = v
-		tmp["id"] = "nothingid"
-		mp[j] = tmp
-		j++
-	}
+	// l := len(urls)
+	// mp := make([]map[string]interface{}, l)
+	// j := 0
+	// for _, v := range urls {
+	// 	tmp := make(map[string]interface{})
+	// 	tmp["url"] = v
+	// 	tmp["id"] = "nothingid"
+	// 	mp[j] = tmp
+	// 	j++
+	// }
 	//mp := []interface{}
 	//mp["key"] = proxy.GetActiveClients("127.0.0.1:6379")
 	//mp["urls"] = proxy.FetchUrlList4Ip("127.0.0.1:6379", "127.0.0.1")
 
-	this.Data["json"] = mp
+	this.Data["json"] = urls
 
 	this.ServeJson()
 }
