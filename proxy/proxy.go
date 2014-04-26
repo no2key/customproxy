@@ -64,9 +64,6 @@ func holdRedis(req_chan chan *Identifier, redisConfig string) {
 		select {
 		case cnt := <-req_chan:
 			s := rds.Cmd("lpush", cnt.Ip, strconv.FormatUint(cnt.Sn, 36))
-			fmt.Println("lpush:", cnt.Ip, strconv.FormatUint(cnt.Sn, 36))
-			fmt.Println("push in list:", cnt.Url)
-
 			if s == nil {
 			} else {
 				fmt.Println("push into list", cnt.Ip, " 失败,", s)
@@ -141,15 +138,12 @@ func FetchUrlList4Ip(redisConfig string, ip string) []map[string]interface{} {
 	errHndlr(err)
 	defer rds.Close()
 	s, _ := rds.Cmd("LRANGE", ip, 0, 100).List()
-
-	//fmt.Println(...)
 	if s == nil {
 		return make([]map[string]interface{}, 0)
 	}
 	res := make([]map[string]interface{}, len(s))
 	i := 0
 	for _, v := range s {
-
 		tmp := make(map[string]interface{})
 		url, _ := rds.Cmd("GET", fmt.Sprintf("url-%s", v)).Str()
 		tmp["url"] = url
