@@ -103,10 +103,12 @@ func GetActiveClients(redisConfig string) []string {
 
 /**
  *  清理不再有持续连接的IP,避免记录太多不必要的数据,将redis撑爆表
+ * 目前设定的是10分钟,10分钟内客户端没有过来操作,则视为不再记录信息;
+ * @todo 可以改进一下,10分钟如果没有动作,则不再录制其访问信息,但是已经录制的,半小时后再删除;
  */
 func RemoveActiveClients(redisConfig string) {
 	var expired_seconds int64
-	expired_seconds = 3
+	expired_seconds = 600
 	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
 	errHndlr(err)
 	defer rds.Close()
@@ -220,6 +222,9 @@ func SrcIpWanted(redisConfig string) goproxy.ReqCondition {
 	})
 }
 
+/**
+* 运行代理服务器
+ */
 func RunProxy(hostAndPort string) {
 	proxy := goproxy.NewProxyHttpServer()
 	req_chan := make(chan *Identifier, 10000)
