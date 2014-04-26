@@ -6,6 +6,7 @@ import (
 	"github.com/astaxie/beego/context"
 	"github.com/elazarl/goproxy"
 	//"github.com/elazarl/goproxy/ext/html"
+	"encoding/json"
 	"github.com/fzzy/radix/redis"
 	"io"
 	"log"
@@ -101,6 +102,57 @@ func GetActiveClients(redisConfig string) []string {
 }
 
 /**
+ *  清理不再有持续连接的IP,避免记录太多不必要的数据,将redis撑爆表
+ */
+func RemoveActiveClients(redisConfig string) {
+	var expired_seconds int64
+	expired_seconds = 3
+	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
+	errHndlr(err)
+	defer rds.Close()
+	for {
+		time.Sleep(time.Second * 10)
+		now := time.Now().Unix()
+		s, _ := rds.Cmd("SMEMBERS", "activeIPs").List()
+		for _, v := range s {
+			expire, err := rds.Cmd("GET", fmt.Sprintf("expire-%s", v)).Str()
+			if err == nil {
+				unixTimeStamp, er := strconv.ParseInt(expire, 36, 64)
+				if er == nil {
+					fmt.Println("got new time stamp:", unixTimeStamp)
+					if (now - unixTimeStamp) > expired_seconds {
+						fmt.Println("expired ,", unixTimeStamp)
+						CleanIP(redisConfig, v)
+					}
+				}
+			}
+		}
+	}
+}
+
+/**
+* 清理为某一个IP记录的数据,包括该IP访问过的地址,所有地址的内容等等;
+ */
+func CleanIP(redisConfig string, ip string) {
+	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
+	errHndlr(err)
+	defer rds.Close()
+	s, _ := rds.Cmd("LRANGE", ip, 0, 10000).List()
+	if s != nil {
+		//有脏数据没有清理;
+		fmt.Println("该IP没有清理数据:", ip)
+	}
+
+	for _, v := range s {
+		rds.Cmd("DEL", fmt.Sprintf("url-%s", v), fmt.Sprintf("content-%s", v),
+			fmt.Sprintf("headers-%s", v))
+	}
+	rds.Cmd("DEL", fmt.Sprintf("expire-%s", ip))
+	rds.Cmd("SREM", "activeIPs", ip)
+	rds.Cmd("LTRIM", ip, 1, 0)
+}
+
+/**
 * 从channel里接收IP,并加入到活跃IP里去
  */
 func IsActiveClients(redisConfig string, ip string) bool {
@@ -120,24 +172,18 @@ func PushActiveClient(redisConfig string, ctx *context.Context) {
 	errHndlr(err)
 	defer rds.Close()
 	rds.Cmd("SADD", "activeIPs", ip)
+	rds.Cmd("SET", fmt.Sprintf("expire-%s", ip), strconv.FormatInt(time.Now().Unix(), 36))
 	//fmt.Println("sadd members:", s)
 }
 
-func fetchQueue() {
-	rds, err := redis.DialTimeout("tcp", "127.0.0.1:6379", time.Duration(10)*time.Second)
-	errHndlr(err)
-	defer rds.Close()
-	for {
-		time.Sleep(time.Second * 1)
-		s, _ := rds.Cmd("rpop", "127.0.0.1").Str()
-		fmt.Println("fetched from Redis:", s)
-	}
-}
-func FetchUrlList4Ip(redisConfig string, ip string) []map[string]interface{} {
+/**
+* 取回某个IP 通过代理请求的所有url信息;
+ */
+func FetchUrlList4Ip(redisConfig string, ip string, size int) []map[string]interface{} {
 	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
 	errHndlr(err)
 	defer rds.Close()
-	s, _ := rds.Cmd("LRANGE", ip, 0, 100).List()
+	s, _ := rds.Cmd("LRANGE", ip, 0, size).List()
 	if s == nil {
 		return make([]map[string]interface{}, 0)
 	}
@@ -154,25 +200,34 @@ func FetchUrlList4Ip(redisConfig string, ip string) []map[string]interface{} {
 	}
 	return res
 }
+
+/**
+某个IP是否以某个地址开头;
+*/
 func SrcIpBeginWith(ip string) goproxy.ReqCondition {
 	return goproxy.ReqConditionFunc(func(req *Request, ctx *goproxy.ProxyCtx) bool {
 		return strings.HasPrefix(req.RemoteAddr, ip+"")
 	})
 }
+
+/*
+* 某个IP是否在活动IP列表中间,如果是的话,需要特别地做个处理,将所有信息记录下来;
+ */
 func SrcIpWanted(redisConfig string) goproxy.ReqCondition {
 	return goproxy.ReqConditionFunc(func(req *Request, ctx *goproxy.ProxyCtx) bool {
 		ip := strings.Split(req.RemoteAddr, ":")[0]
 		return IsActiveClients(redisConfig, ip)
 	})
 }
-func RunProxy() {
-	proxy := goproxy.NewProxyHttpServer()
 
+func RunProxy(hostAndPort string) {
+	proxy := goproxy.NewProxyHttpServer()
 	req_chan := make(chan *Identifier, 10000)
 	//rep_chan := make(chan Response, 100000)
 	go holdRedis(req_chan, "127.0.0.1:6379")
 	//go fetchQueue()
 	//go HoldRedisContent(rep_chan)
+	go RemoveActiveClients("127.0.0.1:6379")
 	var counter uint64
 	counter = 0
 	proxy.OnResponse(SrcIpWanted("127.0.0.1:6379")).DoFunc(func(resp *Response, ctx *goproxy.ProxyCtx) *Response {
@@ -183,6 +238,9 @@ func RunProxy() {
 		if resp == nil {
 			return resp
 		}
+		fmt.Println("got resp", resp.Cookies())
+		fmt.Println("got headers:", resp.Header)
+		//fmt.Println("got ",resp)
 		resp.Body = &CountReadCloser{ctx.Req.URL.String(), resp.Body, 0, make([]byte, 64), counter, "127.0.0.1:6379"}
 
 		rds, err := redis.DialTimeout("tcp", "127.0.0.1:6379", time.Duration(10)*time.Second)
@@ -191,9 +249,11 @@ func RunProxy() {
 		sn := strconv.FormatUint(counter, 36)
 		//将当前请求的URL记录在redis里 key就等于 ulr-{id}
 		rds.Cmd("SET", fmt.Sprintf("url-%s", sn), ctx.Req.URL.String())
+		headers, _ := json.Marshal(resp.Header)
+		rds.Cmd("SET", fmt.Sprintf("headers-%s", sn), string(headers))
 		fmt.Println("redis kv set:", fmt.Sprintf("url-%s", sn), ctx.Req.URL.String())
 		//rep_chan <- *ctx.Resp
 		return resp
 	})
-	log.Fatal(ListenAndServe(":8080", proxy))
+	log.Fatal(ListenAndServe(hostAndPort, proxy))
 }

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/astaxie/beego"
 	"github.com/fzzy/radix/redis"
@@ -41,11 +42,14 @@ func (this *UrlController) View() {
 	//将当前请求的URL记录在redis里 key就等于 ulr-{id}
 	url := rds.Cmd("GET", fmt.Sprintf("url-%s", sn)).String()
 	content := rds.Cmd("GET", fmt.Sprintf("content-%s", sn)).String()
-
+	headersStr := rds.Cmd("GET", fmt.Sprintf("headers-%s", sn)).String()
 	mp["url"] = url
 	mp["id"] = id
 	mp["body"] = content
 	mp["domain"] = "这是请求内容"
+	var headers map[string]interface{}
+	err = json.Unmarshal([]byte(headersStr), &headers)
+	mp["headers"] = headers
 	this.Data["json"] = mp
 	this.ServeJson()
 }
@@ -73,7 +77,7 @@ func (this *UrlController) List() {
 	} else {
 		this.Data["IsClient"] = "no,it's not active client"
 	}
-	urls := proxy.FetchUrlList4Ip("127.0.0.1:6379", "127.0.0.1")
+	urls := proxy.FetchUrlList4Ip("127.0.0.1:6379", "127.0.0.1", 100)
 	// l := len(urls)
 	// mp := make([]map[string]interface{}, l)
 	// j := 0
