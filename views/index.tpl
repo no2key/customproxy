@@ -5,6 +5,7 @@
   <title>Google Phone Gallery</title>
   <link rel="stylesheet" href="static/css/bootstrap.css">
   <link rel="stylesheet" href="static/css/app.css">
+  <script src="static/js/URI.min.js"></script>
   <script src="static/js/angular.js"></script>
   <script src="static/js/angular-route.js"></script>
   <script src="static/js/app.js"></script>

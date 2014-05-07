@@ -3,13 +3,14 @@
     <div class="col-md-2">
       <!--Sidebar content-->
 
-      Search: <input ng-model="query">
+      Search: <input ng-model="query" value="mmstat">
       Sort by:
       <select ng-model="orderProp">
         <option value="domain">Host</option>
         <option value="id">Newest</option>
       </select>
-
+      <br>
+      <a href="#" ng-click="cleanIP()">Clean </a>
     </div>
     <div class="col-md-10">
       <!--Body content-->

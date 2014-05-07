@@ -167,15 +167,21 @@ func IsActiveClients(redisConfig string, ip string) bool {
 
 /**
  * 将新的IP记录到一个列表;
+ * @todo 支持ipv6
  */
 func PushActiveClient(redisConfig string, ctx *context.Context) {
+	fmt.Println("ip:", ctx.Request.RemoteAddr)
 	ip := strings.Split(ctx.Request.RemoteAddr, ":")[0]
+	if ip == "[" {
+		ip = "127.0.0.1"
+	}
 	rds, err := redis.DialTimeout("tcp", redisConfig, time.Duration(10)*time.Second)
 	errHndlr(err)
 	defer rds.Close()
-	rds.Cmd("SADD", "activeIPs", ip)
+	fmt.Println("add ip:", ip)
+	s := rds.Cmd("SADD", "activeIPs", ip)
 	rds.Cmd("SET", fmt.Sprintf("expire-%s", ip), strconv.FormatInt(time.Now().Unix(), 36))
-	//fmt.Println("sadd members:", s)
+	fmt.Println("sadd members:", s)
 }
 
 /**
@@ -218,6 +224,7 @@ func SrcIpBeginWith(ip string) goproxy.ReqCondition {
 func SrcIpWanted(redisConfig string) goproxy.ReqCondition {
 	return goproxy.ReqConditionFunc(func(req *Request, ctx *goproxy.ProxyCtx) bool {
 		ip := strings.Split(req.RemoteAddr, ":")[0]
+		fmt.Println("got client from :", req.RemoteAddr)
 		return IsActiveClients(redisConfig, ip)
 	})
 }
@@ -235,6 +242,10 @@ func RunProxy(hostAndPort string) {
 	go RemoveActiveClients("127.0.0.1:6379")
 	var counter uint64
 	counter = 0
+	proxy.OnRequest(goproxy.ReqHostIs("www.showmyip.com")).DoFunc(func(r *Request, ctx *goproxy.ProxyCtx) (*Request, *Response) {
+		return nil, goproxy.NewResponse(r, goproxy.ContentTypeHtml, StatusUnauthorized, fmt.Sprintf("<!doctype html><html><head><title>showmyip</title></head><body>ip is:{%s}<body/></html>", r.RemoteAddr))
+	})
+
 	proxy.OnResponse(SrcIpWanted("127.0.0.1:6379")).DoFunc(func(resp *Response, ctx *goproxy.ProxyCtx) *Response {
 		fmt.Println("response done :", ctx.Req.URL)
 		counter++
@@ -243,8 +254,7 @@ func RunProxy(hostAndPort string) {
 		if resp == nil {
 			return resp
 		}
-		fmt.Println("got resp", resp.Cookies())
-		fmt.Println("got headers:", resp.Header)
+
 		//fmt.Println("got ",resp)
 		resp.Body = &CountReadCloser{ctx.Req.URL.String(), resp.Body, 0, make([]byte, 64), counter, "127.0.0.1:6379"}
 

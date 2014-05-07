@@ -62,6 +62,23 @@ func (this *UrlController) ListTpl() {
 func (this *UrlController) DetailTpl() {
 	this.TplNames = "detail.tpl"
 }
+func (this *UrlController) IPS() {
+	proxy.PushActiveClient("127.0.0.1:6379", this.Ctx)
+	ips := proxy.GetActiveClients("127.0.0.1:6379")
+	this.Data["json"] = ips
+	this.ServeJson()
+}
+
+func (this *UrlController) Myip() {
+	this.Data["json"] = this.Ctx.Request.RemoteAddr
+	this.ServeJson()
+}
+
+func (this *UrlController) CleanIp() {
+	proxy.CleanIP("127.0.0.1:6379", strings.Split(this.Ctx.Request.RemoteAddr, ":")[0])
+	this.Data["json"] = "OK"
+	this.ServeJson()
+}
 
 /**
 客户端连接的时候,将IP记录到系统库中(记录到redis中去)
