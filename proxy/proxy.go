@@ -113,7 +113,7 @@ func RemoveActiveClients(redisConfig string) {
 	errHndlr(err)
 	defer rds.Close()
 	for {
-		time.Sleep(time.Second * 10)
+		time.Sleep(time.Second * 300)
 		now := time.Now().Unix()
 		s, _ := rds.Cmd("SMEMBERS", "activeIPs").List()
 		for _, v := range s {
